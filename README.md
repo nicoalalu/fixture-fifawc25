@@ -65,14 +65,33 @@ El script `scripts/build-dataset.ts` tiene dos modos (Opción A de la spec §4):
      (`GET /teams?search=`, filtrando `national:true`) — no hay que hardcodear
      ids. Hay un override opcional `API_TEAM_ID_OVERRIDE` por si alguna búsqueda
      es ambigua.
-  2. Trae los últimos partidos de cada una (`GET /fixtures?team=&last=40`),
-     queda sólo con los terminados (FT/AET/PEN) y deduplica los compartidos.
+  2. Trae los partidos de cada una **por temporada**
+     (`GET /fixtures?team=&season=`), queda sólo con los terminados
+     (FT/AET/PEN) y deduplica los compartidos.
   3. Suma como rivales históricos (no clasificados) a cualquier selección que
      aparezca y no esté entre las 48 (con su escudo de la API como bandera).
   4. **Cachea cada respuesta en disco** (`scripts/.cache/`) y **throttlea**
      (`API_FOOTBALL_DELAY_MS`, 1600 ms por defecto) para sobrevivir al rate
      limit del free tier (~100 req/día) y poder reanudar entre corridas.
-     Variables: `API_FOOTBALL_LAST` (partidos por equipo), `API_FOOTBALL_CACHE_DIR`.
+     Variables: `API_FOOTBALL_SEASONS` (temporadas, ej. `2023,2022,2021`),
+     `API_FOOTBALL_CACHE_DIR`, `API_FOOTBALL_RETRIES`.
+
+  **⚠️ Límites del plan Free de api-sports.io** (importante):
+  - No admite el parámetro `last` → por eso pedimos por temporada.
+  - Sólo cubre algunas temporadas (históricamente **2021–2023**); las no
+    disponibles se saltan con un warning, no abortan el build.
+  - **~100 requests/día** y **~10/min**. El build gasta 48 (búsqueda de ids,
+    una sola vez gracias al caché) + 48 × Nº de temporadas. Con **1 temporada**
+    entra en una corrida (~96 req); con más, se completa en días sucesivos
+    (el caché reanuda) o con un plan pago. Para limitar a una temporada:
+    ```bash
+    API_FOOTBALL_SEASONS=2023 API_FOOTBALL_KEY=xxxx npm run build:dataset
+    ```
+  - Si se agota la cuota diaria, el script corta con un mensaje claro y lo ya
+    bajado queda en `scripts/.cache/` para reanudar después sin repetir.
+
+  > Para tener historial reciente completo (2024-2026) hace falta un plan pago;
+  > el Free queda topado en 2023.
 
   El flujo está testeado contra respuestas mockeadas en
   `scripts/api-football.test.ts` (sin red).

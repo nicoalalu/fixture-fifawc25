@@ -313,7 +313,17 @@ const CACHE_DIR = process.env.API_FOOTBALL_CACHE_DIR
 // Subilo si tenés plan pago (más rps) o bajalo si querés ir más rápido.
 const REQUEST_DELAY_MS = Number(process.env.API_FOOTBALL_DELAY_MS ?? 6500);
 const MAX_RETRIES = Number(process.env.API_FOOTBALL_RETRIES ?? 5);
-const FIXTURES_PER_TEAM = Number(process.env.API_FOOTBALL_LAST ?? 40);
+
+// El plan Free NO admite el parámetro `last` y sólo cubre ciertas temporadas
+// (históricamente 2021–2023). Por eso pedimos por temporada. Configurable:
+//   API_FOOTBALL_SEASONS=2023,2022,2021
+// OJO: cada temporada = 48 requests. El free tier son ~100 requests/día, así
+// que con 1 temporada entra en una corrida; con más, se completa en días
+// sucesivos gracias al caché en disco (o con un plan pago).
+const API_FOOTBALL_SEASONS = (process.env.API_FOOTBALL_SEASONS ?? "2023,2022,2021")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Nombre en inglés con el que se busca cada selección en la API. La búsqueda
 // (`/teams?search=`) tolera variantes; ante ambigüedad se filtra national=true.
@@ -385,9 +395,19 @@ export async function apiGet(
 
     const json: any = await res.json();
     if (Array.isArray(json.errors) ? json.errors.length : Object.keys(json.errors ?? {}).length) {
-      // El rate limit a veces llega como 200 con errors.rateLimit.
+      // El rate limit a veces llega como 200 con errors en el body.
       const errStr = JSON.stringify(json.errors);
-      if (/rate|limit/i.test(errStr) && attempt < MAX_RETRIES) {
+      const isDaily = /day|daily|reached the request limit/i.test(errStr);
+      if (isDaily) {
+        // Cuota diaria agotada: no tiene sentido reintentar. Lo ya bajado quedó
+        // cacheado; reanudá mañana o reducí API_FOOTBALL_SEASONS.
+        throw new Error(
+          `API-Football: cuota diaria agotada (${errStr}). Lo descargado quedó ` +
+            `en caché (scripts/.cache); reanudá la corrida cuando se resetee la ` +
+            `cuota, o reducí temporadas con API_FOOTBALL_SEASONS.`,
+        );
+      }
+      if (/rate|limit|too many|minute/i.test(errStr) && attempt < MAX_RETRIES) {
         const waitMs = REQUEST_DELAY_MS * Math.pow(2, attempt);
         console.warn(
           `[build-dataset] rate limit (body) en ${endpoint}; reintento ` +
@@ -485,32 +505,46 @@ export async function buildFromApiFootball(apiKey: string): Promise<Dataset> {
     return synthId;
   }
 
-  // 3) Traer últimos partidos de cada selección y volcarlos al log global.
+  // 3) Traer partidos de cada selección por temporada y volcarlos al log global.
   const matchesById = new Map<string, Match>();
   for (const t of seeds) {
     const apiId = apiIdByTeam.get(t.id)!;
-    const json = await apiGet(
-      apiKey,
-      "/fixtures",
-      { team: apiId, last: FIXTURES_PER_TEAM },
-      `fixtures-${t.id}`,
-    );
-    for (const fx of json.response ?? []) {
-      if (!FINISHED.has(fx.fixture?.status?.short)) continue;
-      const gh = fx.goals?.home;
-      const ga = fx.goals?.away;
-      if (gh == null || ga == null) continue;
-      const id = `af${fx.fixture.id}`;
-      if (matchesById.has(id)) continue; // dedupe (aparece en ambos equipos)
-      const homeId = ensureOpponent(fx.teams.home);
-      const awayId = ensureOpponent(fx.teams.away);
-      matchesById.set(id, {
-        id,
-        fecha: String(fx.fixture.date).slice(0, 10),
-        competicion: traducirLiga(fx.league?.name ?? "Partido"),
-        local: { teamId: homeId, goles: gh },
-        visitante: { teamId: awayId, goles: ga },
-      });
+    for (const season of API_FOOTBALL_SEASONS) {
+      let json: any;
+      try {
+        json = await apiGet(
+          apiKey,
+          "/fixtures",
+          { team: apiId, season },
+          `fixtures-${t.id}-${season}`,
+        );
+      } catch (err) {
+        // Una temporada no disponible en el plan no debe abortar todo el build.
+        if (/plan|season|subscription/i.test(String(err))) {
+          console.warn(
+            `[build-dataset] ${t.codigoFIFA} temporada ${season} no disponible en tu plan; la salto.`,
+          );
+          continue;
+        }
+        throw err;
+      }
+      for (const fx of json.response ?? []) {
+        if (!FINISHED.has(fx.fixture?.status?.short)) continue;
+        const gh = fx.goals?.home;
+        const ga = fx.goals?.away;
+        if (gh == null || ga == null) continue;
+        const id = `af${fx.fixture.id}`;
+        if (matchesById.has(id)) continue; // dedupe (aparece en ambos equipos)
+        const homeId = ensureOpponent(fx.teams.home);
+        const awayId = ensureOpponent(fx.teams.away);
+        matchesById.set(id, {
+          id,
+          fecha: String(fx.fixture.date).slice(0, 10),
+          competicion: traducirLiga(fx.league?.name ?? "Partido"),
+          local: { teamId: homeId, goles: gh },
+          visitante: { teamId: awayId, goles: ga },
+        });
+      }
     }
   }
 
@@ -529,8 +563,8 @@ export async function buildFromApiFootball(apiKey: string): Promise<Dataset> {
       fuente: "api-football",
       ventanaAniosStats: STATS_WINDOW_YEARS,
       notas:
-        `Historial real vía API-Football (${matches.length} partidos, últimos ` +
-        `${FIXTURES_PER_TEAM} por selección). Fechas/sedes del fixture indicativas.`,
+        `Historial real vía API-Football (${matches.length} partidos, temporadas ` +
+        `${API_FOOTBALL_SEASONS.join("/")}). Fechas/sedes del fixture indicativas.`,
     },
     teams,
     matches,
