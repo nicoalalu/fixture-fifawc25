@@ -13,15 +13,17 @@ const FILE = resolve(__dirname, "../src/data/dataset.json");
 export function validateDataset(ds: Dataset): string[] {
   const errors: string[] = [];
 
-  // 48 selecciones.
-  if (ds.teams.length !== 48) {
-    errors.push(`Se esperaban 48 selecciones, hay ${ds.teams.length}.`);
+  // 48 selecciones clasificadas (puede haber rivales históricos extra
+  // no clasificados en datos reales).
+  const clasificadas = ds.teams.filter((t) => t.qualified);
+  if (clasificadas.length !== 48) {
+    errors.push(`Se esperaban 48 selecciones clasificadas, hay ${clasificadas.length}.`);
   }
 
   // 4 por grupo, 12 grupos.
   const porGrupo = new Map<string, number>();
-  for (const t of ds.teams) {
-    porGrupo.set(t.grupo, (porGrupo.get(t.grupo) ?? 0) + 1);
+  for (const t of clasificadas) {
+    if (t.grupo) porGrupo.set(t.grupo, (porGrupo.get(t.grupo) ?? 0) + 1);
   }
   const grupos = "ABCDEFGHIJKL".split("");
   for (const g of grupos) {

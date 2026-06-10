@@ -52,14 +52,36 @@ npm run validate:dataset   # valida el dataset (48 equipos, 12 grupos x4, 72 fix
 El script `scripts/build-dataset.ts` tiene dos modos (Opción A de la spec §4):
 
 - **Sin API key** → genera el snapshot simulado (lo que está commiteado).
-- **Con `API_FOOTBALL_KEY`** → camino para datos reales vía
-  [API-Football](https://www.api-sports.io/). El punto de integración
-  (`buildFromApiFootball`) está documentado en el script; falta completar el
-  mapping `id FIFA → id de equipo de la API` según la cuenta antes de usarlo:
+- **Con `API_FOOTBALL_KEY`** → trae **datos reales** vía
+  [API-Football](https://www.api-sports.io/) y arma el mismo `Dataset`:
 
   ```bash
   API_FOOTBALL_KEY=xxxx npm run build:dataset
   ```
+
+  El camino real (`buildFromApiFootball`) está **implementado de punta a punta**:
+
+  1. Resuelve el id de equipo de cada selección por nombre
+     (`GET /teams?search=`, filtrando `national:true`) — no hay que hardcodear
+     ids. Hay un override opcional `API_TEAM_ID_OVERRIDE` por si alguna búsqueda
+     es ambigua.
+  2. Trae los últimos partidos de cada una (`GET /fixtures?team=&last=40`),
+     queda sólo con los terminados (FT/AET/PEN) y deduplica los compartidos.
+  3. Suma como rivales históricos (no clasificados) a cualquier selección que
+     aparezca y no esté entre las 48 (con su escudo de la API como bandera).
+  4. **Cachea cada respuesta en disco** (`scripts/.cache/`) y **throttlea**
+     (`API_FOOTBALL_DELAY_MS`, 1600 ms por defecto) para sobrevivir al rate
+     limit del free tier (~100 req/día) y poder reanudar entre corridas.
+     Variables: `API_FOOTBALL_LAST` (partidos por equipo), `API_FOOTBALL_CACHE_DIR`.
+
+  El flujo está testeado contra respuestas mockeadas en
+  `scripts/api-football.test.ts` (sin red).
+
+  > ℹ️ **Por qué el snapshot commiteado sigue siendo simulado:** el entorno
+  > donde se generó este código tiene el egreso de red bloqueado por política
+  > (no se puede alcanzar api-sports.io), así que la corrida real hay que
+  > hacerla en un entorno con red abierta y una API key. El código queda listo
+  > para eso.
 
 La simulación es **consciente de las confederaciones**: alterna ventanas de
 eliminatorias/copas continentales (intra-confederación, rivalidades densas) con

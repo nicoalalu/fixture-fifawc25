@@ -32,7 +32,7 @@ export function TeamFicha({ teamId }: { teamId: string }) {
             <h2 className="text-2xl font-bold truncate">{team.nombre}</h2>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-300">
               <span className="chip bg-pitch-500/15 text-pitch-100 ring-1 ring-pitch-500/30">
-                Grupo {team.grupo}
+                Grupo {team.grupo ?? "—"}
               </span>
               <span className="chip bg-white/5 ring-1 ring-white/10">
                 {CONF_LABEL[team.confederacion] ?? team.confederacion}
@@ -40,9 +40,11 @@ export function TeamFicha({ teamId }: { teamId: string }) {
               <span className="chip bg-white/5 ring-1 ring-white/10 font-mono">
                 {team.codigoFIFA}
               </span>
-              <span className="chip bg-white/5 ring-1 ring-white/10">
-                Ranking FIFA #{team.rankingFIFA}
-              </span>
+              {team.rankingFIFA > 0 && (
+                <span className="chip bg-white/5 ring-1 ring-white/10">
+                  Ranking FIFA #{team.rankingFIFA}
+                </span>
+              )}
             </div>
           </div>
         </div>

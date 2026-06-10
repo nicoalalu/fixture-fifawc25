@@ -33,7 +33,7 @@ function TeamCard({
       <span className="min-w-0">
         <span className="block truncate text-sm font-medium">{team.nombre}</span>
         <span className="block text-[11px] text-slate-400 font-mono">
-          {team.codigoFIFA} · Gr. {team.grupo}
+          {team.codigoFIFA} · Gr. {team.grupo ?? "—"}
         </span>
       </span>
     </button>
@@ -53,8 +53,9 @@ export function SeleccionesTab() {
       : teams;
     const map = new Map<string, Team[]>();
     for (const t of filtered) {
-      if (!map.has(t.grupo)) map.set(t.grupo, []);
-      map.get(t.grupo)!.push(t);
+      const g = t.grupo ?? "?";
+      if (!map.has(g)) map.set(g, []);
+      map.get(g)!.push(t);
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [teams, filtroTexto]);

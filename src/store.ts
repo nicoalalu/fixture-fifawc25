@@ -58,8 +58,10 @@ export function getTeam(id: string): Team | undefined {
   return teams.get(id);
 }
 
+/** Sólo las 48 clasificadas (la grilla y el selector libre no muestran
+ *  rivales históricos no clasificados). */
 export function getAllTeams(): Team[] {
-  return dataset.teams;
+  return dataset.teams.filter((t) => t.qualified);
 }
 
 export function getForm(teamId: string): TeamForm {

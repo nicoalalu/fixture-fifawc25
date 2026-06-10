@@ -11,14 +11,14 @@ const ds = JSON.parse(
 ) as Dataset;
 
 describe("dataset snapshot (spec §7.5)", () => {
-  it("tiene exactamente 48 selecciones", () => {
-    expect(ds.teams.length).toBe(48);
+  it("tiene exactamente 48 selecciones clasificadas", () => {
+    expect(ds.teams.filter((t) => t.qualified).length).toBe(48);
   });
 
   it("tiene 4 selecciones en cada uno de los 12 grupos", () => {
     const grupos = "ABCDEFGHIJKL".split("");
     for (const g of grupos) {
-      expect(ds.teams.filter((t) => t.grupo === g).length).toBe(4);
+      expect(ds.teams.filter((t) => t.qualified && t.grupo === g).length).toBe(4);
     }
   });
 

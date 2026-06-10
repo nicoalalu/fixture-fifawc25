@@ -19,9 +19,13 @@ export interface Team {
   nombre: string;
   codigoFIFA: string; // ej. "ARG"
   confederacion: Confederacion;
-  grupo: GrupoId;
-  bandera: string; // emoji
-  rankingFIFA: number; // posición aproximada en el ranking FIFA
+  // grupo del Mundial 2026 para los 48 clasificados; null para rivales
+  // históricos que no están clasificados (aparecen sólo en forma/H2H).
+  grupo: GrupoId | null;
+  bandera: string; // emoji (o url de escudo si viene de la API)
+  rankingFIFA: number; // posición aproximada en el ranking FIFA (0 = desconocido)
+  // true para los 48 clasificados; false para rivales históricos extra.
+  qualified: boolean;
 }
 
 export type Resultado = "G" | "E" | "P";

@@ -1,6 +1,18 @@
 import type { Resultado, Team } from "../types";
 
 export function Flag({ team, className = "" }: { team: Team; className?: string }) {
+  // El dataset simulado usa emojis; el real (API-Football) puede traer la url
+  // del escudo. Soportamos ambos.
+  if (/^https?:\/\//.test(team.bandera)) {
+    return (
+      <img
+        src={team.bandera}
+        alt={`Escudo de ${team.nombre}`}
+        loading="lazy"
+        className={"inline-block h-[1em] w-[1em] object-contain align-[-0.125em] " + className}
+      />
+    );
+  }
   return (
     <span
       role="img"

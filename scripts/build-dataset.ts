@@ -10,10 +10,10 @@
  *     y para demo. Queda marcado en meta.fuente = "simulado".
  *
  * Uso:
- *   npm run build:dataset                 # simulado
- *   API_FOOTBALL_KEY=xxxx npm run build:dataset   # datos reales (cuando exista)
+ *   npm run build:dataset                          # simulado
+ *   API_FOOTBALL_KEY=xxxx npm run build:dataset    # datos reales
  */
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEAMS } from "../src/data/teams.ts";
@@ -120,7 +120,7 @@ function strength(rank: number): number {
 
 function buildSimulated(): Dataset {
   const rng = makeRng(SEED);
-  const teams: Team[] = TEAMS.map((t) => ({ ...t }));
+  const teams: Team[] = TEAMS.map((t) => ({ ...t, qualified: true }));
   const byId = new Map(teams.map((t) => [t.id, t]));
 
   const matches: Match[] = [];
@@ -240,6 +240,7 @@ const HOST_CITIES = [
 function buildFixtures(teams: Team[], _byId: Map<string, Team>): Fixture2026[] {
   const grupos = new Map<GrupoId, Team[]>();
   for (const t of teams) {
+    if (!t.grupo) continue;
     if (!grupos.has(t.grupo)) grupos.set(t.grupo, []);
     grupos.get(t.grupo)!.push(t);
   }
@@ -297,23 +298,212 @@ function buildFixtures(teams: Team[], _byId: Map<string, Team>): Fixture2026[] {
 }
 
 // --------------------------- API-Football ------------------------------------
+//
+// Camino de datos REALES (api-sports.io v3). Resuelve el id de equipo de cada
+// selección por búsqueda de nombre (no hace falta hardcodear ids), trae sus
+// últimos partidos terminados y arma el mismo `Dataset`. Cachea cada respuesta
+// en disco (scripts/.cache) y throttlea, para sobrevivir al rate limit del free
+// tier (~100 req/día) y poder reanudar entre corridas.
 
-/**
- * Camino de datos reales. Implementación de referencia: pega a API-Football
- * (api-sports.io) para traer los últimos partidos de cada selección y arma el
- * mismo `Dataset`. Requiere un mapping de id FIFA -> id de equipo de la API
- * (no incluido acá porque depende de la cuenta). Se deja como punto de
- * integración documentado; lanza si se invoca sin completarlo.
- */
-async function buildFromApiFootball(_apiKey: string): Promise<Dataset> {
-  // Endpoints relevantes (ver §3 de la spec):
-  //   GET https://v3.football.api-sports.io/fixtures?team={id}&last=20
-  //   GET https://v3.football.api-sports.io/fixtures/headtohead?h2h={idA}-{idB}
-  // headers: { "x-apisports-key": apiKey }
-  throw new Error(
-    "buildFromApiFootball: falta el mapping FIFA->API y la cuota de la cuenta. " +
-      "Completá el mapping de equipos y la paginación antes de usar este modo.",
+const API_BASE = "https://v3.football.api-sports.io";
+const CACHE_DIR = process.env.API_FOOTBALL_CACHE_DIR
+  ? resolve(process.env.API_FOOTBALL_CACHE_DIR)
+  : resolve(__dirname, ".cache");
+const REQUEST_DELAY_MS = Number(process.env.API_FOOTBALL_DELAY_MS ?? 1600);
+const FIXTURES_PER_TEAM = Number(process.env.API_FOOTBALL_LAST ?? 40);
+
+// Nombre en inglés con el que se busca cada selección en la API. La búsqueda
+// (`/teams?search=`) tolera variantes; ante ambigüedad se filtra national=true.
+const API_SEARCH_NAME: Record<string, string> = {
+  mex: "Mexico", rsa: "South Africa", kor: "South Korea", cze: "Czech Republic",
+  can: "Canada", sui: "Switzerland", qat: "Qatar", bih: "Bosnia",
+  bra: "Brazil", mar: "Morocco", sco: "Scotland", hai: "Haiti",
+  usa: "USA", aus: "Australia", par: "Paraguay", tur: "Turkey",
+  ger: "Germany", ecu: "Ecuador", civ: "Ivory Coast", cuw: "Curacao",
+  ned: "Netherlands", jpn: "Japan", tun: "Tunisia", swe: "Sweden",
+  bel: "Belgium", irn: "Iran", egy: "Egypt", nzl: "New Zealand",
+  esp: "Spain", uru: "Uruguay", ksa: "Saudi Arabia", cpv: "Cape Verde",
+  fra: "France", sen: "Senegal", nor: "Norway", irq: "Iraq",
+  arg: "Argentina", aut: "Austria", alg: "Algeria", jor: "Jordan",
+  por: "Portugal", col: "Colombia", uzb: "Uzbekistan", cod: "Congo DR",
+  eng: "England", cro: "Croatia", pan: "Panama", gha: "Ghana",
+};
+
+// Override opcional id de API por si la búsqueda falla o es ambigua para
+// alguna selección. Completar acá si hiciera falta (ej. { kor: 17 }).
+const API_TEAM_ID_OVERRIDE: Record<string, number> = {};
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+let liveRequests = 0;
+
+/** GET a la API con caché en disco. Sólo throttlea/cuenta los hits reales. */
+async function apiGet(
+  apiKey: string,
+  endpoint: string,
+  params: Record<string, string | number>,
+  cacheKey: string,
+): Promise<any> {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const cacheFile = resolve(CACHE_DIR, cacheKey + ".json");
+  if (existsSync(cacheFile)) {
+    return JSON.parse(readFileSync(cacheFile, "utf8"));
+  }
+
+  if (liveRequests > 0) await sleep(REQUEST_DELAY_MS);
+  liveRequests++;
+
+  const qs = new URLSearchParams(
+    Object.entries(params).map(([k, v]) => [k, String(v)] as [string, string]),
+  ).toString();
+  const url = `${API_BASE}${endpoint}?${qs}`;
+  const res = await fetch(url, { headers: { "x-apisports-key": apiKey } });
+  if (!res.ok) {
+    throw new Error(`API-Football ${endpoint} -> HTTP ${res.status} ${res.statusText}`);
+  }
+  const json: any = await res.json();
+  if (Array.isArray(json.errors) ? json.errors.length : Object.keys(json.errors ?? {}).length) {
+    throw new Error(`API-Football ${endpoint} errores: ${JSON.stringify(json.errors)}`);
+  }
+  writeFileSync(cacheFile, JSON.stringify(json), "utf8");
+  return json;
+}
+
+async function resolveTeamId(apiKey: string, teamId: string): Promise<number> {
+  if (API_TEAM_ID_OVERRIDE[teamId]) return API_TEAM_ID_OVERRIDE[teamId];
+  const search = API_SEARCH_NAME[teamId] ?? teamId;
+  const json = await apiGet(apiKey, "/teams", { search }, `team-search-${teamId}`);
+  const candidatos: any[] = json.response ?? [];
+  const national = candidatos.find((c) => c.team?.national) ?? candidatos[0];
+  if (!national?.team?.id) {
+    throw new Error(
+      `No se pudo resolver el id de API para "${search}" (${teamId}). ` +
+        `Agregá un override en API_TEAM_ID_OVERRIDE.`,
+    );
+  }
+  return national.team.id;
+}
+
+// Traducción liviana de competiciones frecuentes al español.
+function traducirLiga(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("friendl")) return "Amistoso";
+  if (n.includes("nations league")) return "UEFA Nations League";
+  if (n.includes("euro")) return "Eurocopa";
+  if (n.includes("copa america") || n.includes("copa américa")) return "Copa América";
+  if (n.includes("gold cup")) return "Copa Oro";
+  if (n.includes("africa")) return "Copa Africana de Naciones";
+  if (n.includes("asian cup")) return "Copa Asiática";
+  if (n.includes("world cup") && n.includes("quali")) return "Eliminatorias Mundial";
+  if (n.includes("world cup")) return "Copa del Mundo";
+  if (n.includes("quali")) return "Eliminatorias";
+  return name;
+}
+
+const FINISHED = new Set(["FT", "AET", "PEN"]);
+
+export async function buildFromApiFootball(apiKey: string): Promise<Dataset> {
+  // Verifica la cuenta / cuota antes de empezar.
+  const status = await apiGet(apiKey, "/status", {}, "status");
+  const reqInfo = status.response?.requests;
+  if (reqInfo) {
+    console.log(
+      `[build-dataset] API-Football cuenta "${status.response?.account?.email ?? "?"}" ` +
+        `· requests ${reqInfo.current}/${reqInfo.limit_day} hoy.`,
+    );
+  }
+
+  const seeds = TEAMS;
+
+  // 1) Resolver id de API por selección.
+  const apiIdByTeam = new Map<string, number>();
+  const teamByApiId = new Map<number, string>();
+  for (const t of seeds) {
+    const apiId = await resolveTeamId(apiKey, t.id);
+    apiIdByTeam.set(t.id, apiId);
+    teamByApiId.set(apiId, t.id);
+    console.log(`[build-dataset]   ${t.codigoFIFA} -> API id ${apiId}`);
+  }
+
+  // 2) Equipos: las 48 clasificadas + rivales históricos (se agregan al vuelo).
+  const teams: Team[] = seeds.map((t) => ({ ...t, qualified: true }));
+  const teamsById = new Map(teams.map((t) => [t.id, t]));
+
+  function ensureOpponent(apiTeam: { id: number; name: string; logo?: string }): string {
+    const known = teamByApiId.get(apiTeam.id);
+    if (known) return known;
+    const synthId = `api-${apiTeam.id}`;
+    if (!teamsById.has(synthId)) {
+      const opp: Team = {
+        id: synthId,
+        nombre: apiTeam.name,
+        codigoFIFA: apiTeam.name.slice(0, 3).toUpperCase(),
+        confederacion: "UEFA", // desconocida; no se usa para rivales no clasificados
+        grupo: null,
+        bandera: apiTeam.logo ?? "🏳️",
+        rankingFIFA: 0,
+        qualified: false,
+      };
+      teams.push(opp);
+      teamsById.set(synthId, opp);
+      teamByApiId.set(apiTeam.id, synthId);
+    }
+    return synthId;
+  }
+
+  // 3) Traer últimos partidos de cada selección y volcarlos al log global.
+  const matchesById = new Map<string, Match>();
+  for (const t of seeds) {
+    const apiId = apiIdByTeam.get(t.id)!;
+    const json = await apiGet(
+      apiKey,
+      "/fixtures",
+      { team: apiId, last: FIXTURES_PER_TEAM },
+      `fixtures-${t.id}`,
+    );
+    for (const fx of json.response ?? []) {
+      if (!FINISHED.has(fx.fixture?.status?.short)) continue;
+      const gh = fx.goals?.home;
+      const ga = fx.goals?.away;
+      if (gh == null || ga == null) continue;
+      const id = `af${fx.fixture.id}`;
+      if (matchesById.has(id)) continue; // dedupe (aparece en ambos equipos)
+      const homeId = ensureOpponent(fx.teams.home);
+      const awayId = ensureOpponent(fx.teams.away);
+      matchesById.set(id, {
+        id,
+        fecha: String(fx.fixture.date).slice(0, 10),
+        competicion: traducirLiga(fx.league?.name ?? "Partido"),
+        local: { teamId: homeId, goles: gh },
+        visitante: { teamId: awayId, goles: ga },
+      });
+    }
+  }
+
+  const matches = [...matchesById.values()].sort((a, b) =>
+    a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0,
   );
+
+  // 4) Fixture del Mundial: se arma con los grupos reales (fechas/sedes
+  //    indicativas). La parte "real" que nos importaba era el historial.
+  const fixtures = buildFixtures(teams.filter((t) => t.qualified), teamsById);
+
+  return {
+    meta: {
+      version: "0.1.0",
+      generadoEl: new Date().toISOString(),
+      fuente: "api-football",
+      ventanaAniosStats: STATS_WINDOW_YEARS,
+      notas:
+        `Historial real vía API-Football (${matches.length} partidos, últimos ` +
+        `${FIXTURES_PER_TEAM} por selección). Fechas/sedes del fixture indicativas.`,
+    },
+    teams,
+    matches,
+    fixtures,
+  };
 }
 
 // --------------------------------- main --------------------------------------
@@ -344,7 +534,11 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const isCli =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCli) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
