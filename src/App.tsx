@@ -62,11 +62,23 @@ export default function App() {
         {dataset.meta.fuente === "simulado" ? (
           <p>
             ⚠️ Datos históricos <strong>simulados</strong> (determinista, a partir
-            del ranking FIFA) — no son resultados reales. Regenerá el snapshot con{" "}
-            <code className="font-mono">API_FOOTBALL_KEY</code> para datos reales.
+            del ranking FIFA) — no son resultados reales.
+          </p>
+        ) : dataset.meta.fuente === "open-data" ? (
+          <p>
+            Datos reales del proyecto abierto{" "}
+            <a
+              href="https://github.com/martj42/international_results"
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-slate-300"
+            >
+              martj42/international_results
+            </a>
+            . Snapshot del {dataset.meta.generadoEl.slice(0, 10)}.
           </p>
         ) : (
-          <p>Datos vía API-Football. Snapshot generado el {dataset.meta.generadoEl.slice(0, 10)}.</p>
+          <p>Datos vía API-Football. Snapshot del {dataset.meta.generadoEl.slice(0, 10)}.</p>
         )}
         <p className="mt-1">
           Herramienta de consulta para armar tu prode. No es una app de apuestas.

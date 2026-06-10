@@ -44,20 +44,35 @@ npm run validate:dataset   # valida el dataset (48 equipos, 12 grupos x4, 72 fix
 
 ## Datos
 
-> ⚠️ **El dataset incluido es SIMULADO.** Los partidos históricos se generan de
-> forma **determinista** (seed fija) a partir del ranking FIFA de cada selección,
-> así que son plausibles pero **no son resultados reales**. Los grupos, las
-> selecciones, las confederaciones y la estructura del fixture sí son reales.
+El dataset commiteado son **datos reales** (Opción A de la spec §4). El script
+`scripts/build-dataset.ts` soporta tres fuentes, elegibles con `DATA_SOURCE`:
 
-El script `scripts/build-dataset.ts` tiene dos modos (Opción A de la spec §4):
+### 1. Open data (por defecto, real, sin API key) ✅
 
-- **Sin API key** → genera el snapshot simulado (lo que está commiteado).
-- **Con `API_FOOTBALL_KEY`** → trae **datos reales** vía
-  [API-Football](https://www.api-sports.io/) y arma el mismo `Dataset`:
+Usa el proyecto abierto
+[**martj42/international_results**](https://github.com/martj42/international_results):
+un CSV con **todos** los partidos de selecciones desde 1872 (amistosos,
+eliminatorias, copas, mundiales), gratis, sin key ni rate limit, y que además
+**incluye el fixture real del Mundial 2026** (fechas y sedes reales). Se clona
+por `git` y se cachea en `scripts/.cache/`.
 
-  ```bash
-  API_FOOTBALL_KEY=xxxx npm run build:dataset
-  ```
+```bash
+npm run build:dataset                 # datos reales, sin configurar nada
+OPEN_DATA_SINCE=1990-01-01 npm run build:dataset   # más historia (H2H más profundo)
+```
+
+- `OPEN_DATA_SINCE` (default `2002-01-01`) controla cuánta historia se incluye.
+  Más atrás = H2H más completo pero snapshot más grande (1990 ≈ 2.3MB,
+  2002 ≈ 1.6MB, 2010 ≈ 1.1MB).
+- Las selecciones rivales que no están entre las 48 se agregan como no
+  clasificadas (`qualified:false`) para que la forma y el H2H sean fieles.
+- El ranking FIFA mostrado es aproximado (no viene en esta fuente).
+
+### 2. API-Football (real, requiere key)
+
+```bash
+API_FOOTBALL_KEY=xxxx npm run build:dataset   # DATA_SOURCE pasa a "api-football"
+```
 
   El camino real (`buildFromApiFootball`) está **implementado de punta a punta**:
 
@@ -96,18 +111,17 @@ El script `scripts/build-dataset.ts` tiene dos modos (Opción A de la spec §4):
   El flujo está testeado contra respuestas mockeadas en
   `scripts/api-football.test.ts` (sin red).
 
-  > ℹ️ **Por qué el snapshot commiteado sigue siendo simulado:** el entorno
-  > donde se generó este código tiene el egreso de red bloqueado por política
-  > (no se puede alcanzar api-sports.io), así que la corrida real hay que
-  > hacerla en un entorno con red abierta y una API key. El código queda listo
-  > para eso.
+### 3. Simulado (sin red, para demo/desarrollo)
 
-La simulación es **consciente de las confederaciones**: alterna ventanas de
-eliminatorias/copas continentales (intra-confederación, rivalidades densas) con
-amistosos inter-confederación. Por eso muchos cruces de grupos del Mundial
-quedan inéditos (como en la realidad) mientras que los clásicos continentales
-(ej. Argentina–Uruguay) tienen historial rico que dispara los insights de
-dominancia y tendencia.
+```bash
+DATA_SOURCE=simulated npm run build:dataset
+```
+
+Genera partidos **deterministas** (seed fija) a partir del ranking FIFA, sin red
+ni API key. Es **consciente de las confederaciones**: alterna ventanas de
+eliminatorias/copas continentales (intra-confederación) con amistosos
+inter-confederación, así que los clásicos continentales tienen historial rico y
+muchos cruces inter-confederación quedan inéditos. No son resultados reales.
 
 ### Modelo de datos
 
@@ -132,14 +146,15 @@ Como la spec dejaba decisiones abiertas, se resolvieron con defaults razonables:
    tendencia).
 3. **Arquitectura** → **Opción A** (snapshot estático, sin backend, apto artifact).
 4. **Insights** → solo reglas deterministas (capa LLM como backlog).
-5. **Fuente de datos** → snapshot (simulado por defecto; build real con API key).
+5. **Fuente de datos** → snapshot real por defecto desde open data
+   (martj42/international_results); API-Football y simulado como alternativas.
 6. **"VS / en qué copa"** → se incluye competición, local/visitante y sede.
 
 ## Estructura
 
 ```
 scripts/
-  build-dataset.ts      # genera el snapshot (simulado o API-Football)
+  build-dataset.ts      # genera el snapshot (open data / API-Football / simulado)
   validate-dataset.ts   # validación (48 equipos, 12 grupos x4, 72 fixtures)
 src/
   data/teams.ts         # las 48 selecciones (datos reales)

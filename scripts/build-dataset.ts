@@ -2,20 +2,22 @@
  * Build del dataset (Opción A de la spec, §4): genera un snapshot estático
  * `src/data/dataset.json` que la app consume sin backend ni API key en runtime.
  *
- * Dos modos:
- *  1. API-Football  -> si existe la env var API_FOOTBALL_KEY, pega a la API y
- *     arma el dataset con datos reales. (función buildFromApiFootball)
- *  2. Simulado      -> si no hay key, genera datos deterministas (seed fija)
- *     plausibles a partir del ranking de cada selección. Sirve para desarrollar
- *     y para demo. Queda marcado en meta.fuente = "simulado".
+ * Tres fuentes (elegibles con DATA_SOURCE; por defecto la primera que aplique):
+ *  1. open-data    -> DEFAULT. Datos REALES del CSV abierto
+ *     martj42/international_results (gratis, sin key). Incluye el fixture real
+ *     del Mundial 2026. (buildFromOpenData)
+ *  2. api-football -> si está API_FOOTBALL_KEY. Datos reales vía API-Football.
+ *  3. simulated    -> datos deterministas a partir del ranking, sin red.
  *
  * Uso:
- *   npm run build:dataset                          # simulado
- *   API_FOOTBALL_KEY=xxxx npm run build:dataset    # datos reales
+ *   npm run build:dataset                          # open data (real)
+ *   API_FOOTBALL_KEY=xxxx npm run build:dataset    # API-Football
+ *   DATA_SOURCE=simulated npm run build:dataset    # simulado
  */
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { TEAMS } from "../src/data/teams.ts";
 import type {
   Dataset,
@@ -572,20 +574,205 @@ export async function buildFromApiFootball(apiKey: string): Promise<Dataset> {
   };
 }
 
+// ----------------------- open data (martj42/results) -------------------------
+//
+// Fuente REAL, gratuita y sin API key: el dataset abierto
+// "International football results from 1872 to present"
+// (github.com/martj42/international_results). Trae TODOS los partidos de
+// selecciones (amistosos, eliminatorias, copas, mundiales) en un CSV, y además
+// incluye el fixture real del Mundial 2026 (con fecha y sede). Se clona por git
+// (canal disponible incluso con egreso HTTP restringido) y se cachea.
+
+const OPEN_DATA_REPO = "https://github.com/martj42/international_results.git";
+// Ventana de historia incluida. Más atrás = H2H más completo pero snapshot más
+// grande (1990 ≈ 2.3MB, 2002 ≈ 1.6MB, 2010 ≈ 1.1MB). 2002 equilibra H2H real y
+// peso para mobile, sin pasarse del presupuesto (<2-3MB).
+const OPEN_DATA_SINCE = process.env.OPEN_DATA_SINCE ?? "2002-01-01";
+
+// Nombre del CSV -> id FIFA de las 48 clasificadas. Grafías tomadas del propio
+// dataset (filas "FIFA World Cup" de 2026).
+const OPEN_NAME_TO_ID: Record<string, string> = {
+  Algeria: "alg", Argentina: "arg", Australia: "aus", Austria: "aut",
+  Belgium: "bel", "Bosnia and Herzegovina": "bih", Brazil: "bra", Canada: "can",
+  "Cape Verde": "cpv", Colombia: "col", Croatia: "cro", "Curaçao": "cuw",
+  "Czech Republic": "cze", "DR Congo": "cod", Ecuador: "ecu", Egypt: "egy",
+  England: "eng", France: "fra", Germany: "ger", Ghana: "gha", Haiti: "hai",
+  Iran: "irn", Iraq: "irq", "Ivory Coast": "civ", Japan: "jpn", Jordan: "jor",
+  Mexico: "mex", Morocco: "mar", Netherlands: "ned", "New Zealand": "nzl",
+  Norway: "nor", Panama: "pan", Paraguay: "par", Portugal: "por", Qatar: "qat",
+  "Saudi Arabia": "ksa", Scotland: "sco", Senegal: "sen", "South Africa": "rsa",
+  "South Korea": "kor", Spain: "esp", Sweden: "swe", Switzerland: "sui",
+  Tunisia: "tun", Turkey: "tur", "United States": "usa", Uruguay: "uru",
+  Uzbekistan: "uzb",
+};
+
+// Traducción de competiciones del CSV (en inglés) al español.
+function traducirTorneo(t: string): string {
+  const n = t.toLowerCase();
+  if (n === "friendly") return "Amistoso";
+  if (n.includes("fifa world cup qualification")) return "Eliminatorias Mundial";
+  if (n.includes("fifa world cup")) return "Copa del Mundo";
+  if (n.includes("uefa nations league")) return "UEFA Nations League";
+  if (n.includes("uefa euro qualification")) return "Eliminatorias Eurocopa";
+  if (n.includes("uefa euro")) return "Eurocopa";
+  if (n.includes("copa américa") || n.includes("copa america")) return "Copa América";
+  if (n.includes("gold cup")) return "Copa Oro";
+  if (n.includes("african cup") || n.includes("africa cup")) return "Copa Africana de Naciones";
+  if (n.includes("afc asian cup")) return "Copa Asiática";
+  if (n.includes("concacaf nations league")) return "Liga de Naciones CONCACAF";
+  if (n.includes("finalissima")) return "Finalissima";
+  return t;
+}
+
+/** Devuelve el path al results.csv, clonando/actualizando el repo si hace falta. */
+function ensureOpenDataCsv(): string {
+  if (process.env.OPEN_DATA_CSV) return resolve(process.env.OPEN_DATA_CSV);
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const dir = resolve(CACHE_DIR, "international_results");
+  const csv = resolve(dir, "results.csv");
+  if (existsSync(csv)) {
+    try {
+      execFileSync("git", ["-C", dir, "pull", "--depth", "1", "--quiet"], { stdio: "ignore" });
+    } catch {
+      /* si falla el pull, usamos lo cacheado */
+    }
+  } else {
+    console.log(`[build-dataset] Clonando dataset abierto (${OPEN_DATA_REPO})…`);
+    execFileSync("git", ["clone", "--depth", "1", OPEN_DATA_REPO, dir], { stdio: "inherit" });
+  }
+  return csv;
+}
+
+/** Parser CSV mínimo (este dataset no usa comas embebidas ni comillas). */
+function parseCsv(text: string): string[][] {
+  return text
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.split(","));
+}
+
+function buildFromOpenData(): Dataset {
+  const csvPath = ensureOpenDataCsv();
+  const rows = parseCsv(readFileSync(csvPath, "utf8"));
+  const header = rows.shift()!;
+  const col = (name: string) => header.indexOf(name);
+  const iDate = col("date"), iHome = col("home_team"), iAway = col("away_team"),
+    iHS = col("home_score"), iAS = col("away_score"), iTour = col("tournament"),
+    iCity = col("city");
+
+  const teams: Team[] = TEAMS.map((t) => ({ ...t, qualified: true }));
+  const teamsById = new Map(teams.map((t) => [t.id, t]));
+  const nameToId = new Map(Object.entries(OPEN_NAME_TO_ID));
+
+  function teamIdFor(nombre: string): string {
+    const known = nameToId.get(nombre);
+    if (known) return known;
+    const synthId = "od-" + nombre.toLowerCase().replace(/[^a-z]+/g, "-");
+    if (!teamsById.has(synthId)) {
+      const opp: Team = {
+        id: synthId,
+        nombre,
+        codigoFIFA: nombre.slice(0, 3).toUpperCase(),
+        confederacion: "UEFA", // desconocida; no se usa para no clasificados
+        grupo: null,
+        bandera: "🏳️",
+        rankingFIFA: 0,
+        qualified: false,
+      };
+      teams.push(opp);
+      teamsById.set(synthId, opp);
+      nameToId.set(nombre, synthId);
+    }
+    return synthId;
+  }
+
+  const matches: Match[] = [];
+  const fixtures: Fixture2026[] = [];
+  let matchSeq = 0;
+  let fixtureSeq = 0;
+
+  for (const r of rows) {
+    const fecha = r[iDate];
+    const homeName = r[iHome];
+    const awayName = r[iAway];
+    const homeIn48 = OPEN_NAME_TO_ID[homeName];
+    const awayIn48 = OPEN_NAME_TO_ID[awayName];
+
+    // Fixture real del Mundial 2026 (fase de grupos: 11–27 jun, ambos clasificados).
+    const esWC2026 =
+      r[iTour] === "FIFA World Cup" && fecha >= "2026-06-11" && fecha <= "2026-06-27";
+    if (esWC2026 && homeIn48 && awayIn48) {
+      const grupo = teamsById.get(homeIn48)!.grupo;
+      fixtures.push({
+        id: `wc2026-${++fixtureSeq}`,
+        grupo: grupo ?? "A",
+        fecha,
+        sede: r[iCity] || "Por confirmar",
+        teamAId: homeIn48,
+        teamBId: awayIn48,
+        fase: "grupos",
+        numeroPartido: fixtureSeq,
+      });
+      continue;
+    }
+
+    // Partidos históricos: con resultado, dentro de la ventana, que involucren
+    // al menos una de las 48.
+    const hs = Number(r[iHS]);
+    const as = Number(r[iAS]);
+    if (!Number.isFinite(hs) || !Number.isFinite(as)) continue;
+    if (fecha < OPEN_DATA_SINCE) continue;
+    if (fecha > "2026-06-10") continue; // nada posterior al "hoy" del snapshot
+    if (!homeIn48 && !awayIn48) continue;
+
+    matches.push({
+      id: `od${++matchSeq}`,
+      fecha,
+      competicion: traducirTorneo(r[iTour]),
+      local: { teamId: teamIdFor(homeName), goles: hs },
+      visitante: { teamId: teamIdFor(awayName), goles: as },
+    });
+  }
+
+  matches.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0));
+  fixtures.sort((a, b) =>
+    a.fecha === b.fecha ? a.numeroPartido - b.numeroPartido : a.fecha < b.fecha ? -1 : 1,
+  );
+  fixtures.forEach((f, i) => (f.numeroPartido = i + 1));
+
+  return {
+    meta: {
+      version: "0.1.0",
+      generadoEl: new Date().toISOString(),
+      fuente: "open-data",
+      ventanaAniosStats: STATS_WINDOW_YEARS,
+      notas:
+        `Datos REALES del dataset abierto martj42/international_results ` +
+        `(${matches.length} partidos desde ${OPEN_DATA_SINCE}; fixture WC2026 real).`,
+    },
+    teams,
+    matches,
+    fixtures,
+  };
+}
+
 // --------------------------------- main --------------------------------------
 
 async function main() {
-  const apiKey = process.env.API_FOOTBALL_KEY;
+  const source =
+    process.env.DATA_SOURCE ??
+    (process.env.API_FOOTBALL_KEY ? "api-football" : "open-data");
   let dataset: Dataset;
 
-  if (apiKey) {
-    console.log("[build-dataset] Usando API-Football (datos reales).");
-    dataset = await buildFromApiFootball(apiKey);
-  } else {
-    console.log(
-      "[build-dataset] Sin API_FOOTBALL_KEY: generando snapshot SIMULADO determinista.",
-    );
+  if (source === "simulated" || source === "simulado") {
+    console.log("[build-dataset] Generando snapshot SIMULADO determinista.");
     dataset = buildSimulated();
+  } else if (source === "api-football") {
+    console.log("[build-dataset] Usando API-Football (datos reales).");
+    dataset = await buildFromApiFootball(process.env.API_FOOTBALL_KEY!);
+  } else {
+    console.log("[build-dataset] Usando dataset abierto martj42 (datos reales, sin API key).");
+    dataset = buildFromOpenData();
   }
 
   mkdirSync(dirname(OUT), { recursive: true });

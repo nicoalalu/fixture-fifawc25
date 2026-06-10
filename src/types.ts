@@ -54,7 +54,7 @@ export interface Fixture2026 {
 export interface DatasetMeta {
   version: string;
   generadoEl: string; // ISO
-  fuente: "api-football" | "simulado";
+  fuente: "api-football" | "open-data" | "simulado";
   ventanaAniosStats: number;
   notas?: string;
 }
