@@ -309,7 +309,10 @@ const API_BASE = "https://v3.football.api-sports.io";
 const CACHE_DIR = process.env.API_FOOTBALL_CACHE_DIR
   ? resolve(process.env.API_FOOTBALL_CACHE_DIR)
   : resolve(__dirname, ".cache");
-const REQUEST_DELAY_MS = Number(process.env.API_FOOTBALL_DELAY_MS ?? 1600);
+// Free tier de api-sports.io: ~10 requests/minuto → ~6.5 s de espaciado.
+// Subilo si tenés plan pago (más rps) o bajalo si querés ir más rápido.
+const REQUEST_DELAY_MS = Number(process.env.API_FOOTBALL_DELAY_MS ?? 6500);
+const MAX_RETRIES = Number(process.env.API_FOOTBALL_RETRIES ?? 5);
 const FIXTURES_PER_TEAM = Number(process.env.API_FOOTBALL_LAST ?? 40);
 
 // Nombre en inglés con el que se busca cada selección en la API. La búsqueda
@@ -340,7 +343,7 @@ function sleep(ms: number) {
 let liveRequests = 0;
 
 /** GET a la API con caché en disco. Sólo throttlea/cuenta los hits reales. */
-async function apiGet(
+export async function apiGet(
   apiKey: string,
   endpoint: string,
   params: Record<string, string | number>,
@@ -352,23 +355,52 @@ async function apiGet(
     return JSON.parse(readFileSync(cacheFile, "utf8"));
   }
 
-  if (liveRequests > 0) await sleep(REQUEST_DELAY_MS);
-  liveRequests++;
-
   const qs = new URLSearchParams(
     Object.entries(params).map(([k, v]) => [k, String(v)] as [string, string]),
   ).toString();
   const url = `${API_BASE}${endpoint}?${qs}`;
-  const res = await fetch(url, { headers: { "x-apisports-key": apiKey } });
-  if (!res.ok) {
-    throw new Error(`API-Football ${endpoint} -> HTTP ${res.status} ${res.statusText}`);
+
+  for (let attempt = 0; ; attempt++) {
+    if (liveRequests > 0) await sleep(REQUEST_DELAY_MS);
+    liveRequests++;
+
+    const res = await fetch(url, { headers: { "x-apisports-key": apiKey } });
+
+    // 429 (rate limit) o 5xx: reintentar con backoff, respetando Retry-After.
+    if ((res.status === 429 || res.status >= 500) && attempt < MAX_RETRIES) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : REQUEST_DELAY_MS * Math.pow(2, attempt);
+      console.warn(
+        `[build-dataset] HTTP ${res.status} en ${endpoint}; reintento ` +
+          `${attempt + 1}/${MAX_RETRIES} en ${Math.round(waitMs / 1000)}s…`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`API-Football ${endpoint} -> HTTP ${res.status} ${res.statusText}`);
+    }
+
+    const json: any = await res.json();
+    if (Array.isArray(json.errors) ? json.errors.length : Object.keys(json.errors ?? {}).length) {
+      // El rate limit a veces llega como 200 con errors.rateLimit.
+      const errStr = JSON.stringify(json.errors);
+      if (/rate|limit/i.test(errStr) && attempt < MAX_RETRIES) {
+        const waitMs = REQUEST_DELAY_MS * Math.pow(2, attempt);
+        console.warn(
+          `[build-dataset] rate limit (body) en ${endpoint}; reintento ` +
+            `${attempt + 1}/${MAX_RETRIES} en ${Math.round(waitMs / 1000)}s…`,
+        );
+        await sleep(waitMs);
+        continue;
+      }
+      throw new Error(`API-Football ${endpoint} errores: ${errStr}`);
+    }
+    writeFileSync(cacheFile, JSON.stringify(json), "utf8");
+    return json;
   }
-  const json: any = await res.json();
-  if (Array.isArray(json.errors) ? json.errors.length : Object.keys(json.errors ?? {}).length) {
-    throw new Error(`API-Football ${endpoint} errores: ${JSON.stringify(json.errors)}`);
-  }
-  writeFileSync(cacheFile, JSON.stringify(json), "utf8");
-  return json;
 }
 
 async function resolveTeamId(apiKey: string, teamId: string): Promise<number> {

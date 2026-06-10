@@ -13,7 +13,7 @@ process.env.API_FOOTBALL_CACHE_DIR = cacheDir;
 process.env.API_FOOTBALL_DELAY_MS = "0";
 
 // Importar DESPUÉS de fijar las env vars (CACHE_DIR se lee al cargar el módulo).
-const { buildFromApiFootball } = await import("./build-dataset.ts");
+const { buildFromApiFootball, apiGet } = await import("./build-dataset.ts");
 
 let apiSeq = 1000;
 
@@ -107,5 +107,19 @@ describe("buildFromApiFootball (mock)", () => {
     expect(bolivia).toBeTruthy();
     expect(bolivia!.qualified).toBe(false);
     expect(bolivia!.bandera).toMatch(/^https?:\/\//);
+  });
+
+  it("reintenta ante un 429 y termina resolviendo", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls++;
+      if (calls < 3) {
+        return { ok: false, status: 429, statusText: "Too Many Requests", headers: { get: () => null } };
+      }
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({ errors: [], response: [{ ok: true }] }) };
+    });
+    const json = await apiGet("FAKE_KEY", "/status", {}, "retry-test");
+    expect(calls).toBe(3); // dos 429 + un 200
+    expect(json.response[0].ok).toBe(true);
   });
 });
